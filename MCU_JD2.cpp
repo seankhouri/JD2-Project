@@ -18,6 +18,20 @@
 #include <Arduino.h>
 
 // ---------------------- Pins / Inputs -----------------------
+
+
+// Joint 1 (U1 in schematic)
+const int PIN_J1_EN    = 25;   // EN
+const int PIN_J1_STEP  = 26;   // STEP
+const int PIN_J1_DIR   = 27;   // DIR
+const int PIN_J1_LIMIT = 32;   // limit switch  (add later)
+
+// Joint 2 (U2 in schematic)
+const int PIN_J2_EN    = 14;   // EN
+const int PIN_J2_STEP  = 12;   // STEP
+const int PIN_J2_DIR   = 13;   // DIR
+const int PIN_J2_LIMIT = 33;   // limit switch (add later)
+
 const int PIN_ESTOP        = 4;   // active LOW emergency stop
 const int PIN_BTN_START    = 5;   // start / send motion command (example)
 const int PIN_BTN_PAUSE    = 18;  // pause
@@ -48,6 +62,19 @@ struct MotionCommand {
 };
 
 MotionCommand currentCommand;
+
+// ---------------------- Motion State (J1 only for now) -----
+const long J1_STEPS_PER_MOVE      = 1000;        // steps per test move
+const unsigned long STEP_INTERVAL_US = 1000;     // 1 kHz step rate
+
+long j1_steps_done = 0;
+unsigned long last_step_time_us = 0;
+bool motion_active = false;
+
+// ---------------------- GUI <-> MCU G-code Test ------------
+const long GUI_BAUD = 115200;
+const int GUI_MAX_LEN = 50;   // interface property: max G-code line length
+String gui_line = "";         // stores one incoming line from GUI
 
 // ---------------------- Helpers: Inputs ---------------------
 
@@ -81,12 +108,45 @@ bool resetRequested() {
 // just return dummy values so the FSM structure compiles.
 
 bool initHardware() {
-  // Configure GPIO, UART, drivers, timers, etc.
-  // Return true on success, false on failure.
-  // --------------------------------------------------
-  // TODO: put real init code here
-  // --------------------------------------------------
+  // ----- Joint 1 -----
+  pinMode(PIN_J1_STEP, OUTPUT);
+  pinMode(PIN_J1_DIR,  OUTPUT);
+  pinMode(PIN_J1_EN,   OUTPUT);
+  pinMode(PIN_J1_LIMIT, INPUT_PULLUP);
+
+  digitalWrite(PIN_J1_STEP, LOW);
+  digitalWrite(PIN_J1_DIR,  LOW);
+
+  // ----- Joint 2 -----
+  pinMode(PIN_J2_STEP, OUTPUT);
+  pinMode(PIN_J2_DIR,  OUTPUT);
+  pinMode(PIN_J2_EN,   OUTPUT);
+  pinMode(PIN_J2_LIMIT, INPUT_PULLUP);
+
+  digitalWrite(PIN_J2_STEP, LOW);
+  digitalWrite(PIN_J2_DIR,  LOW);
+
+  // Enable both drivers at startup
+  enableAllMotors();
+
   return true;
+}
+
+void singleStepJ1() {
+  digitalWrite(PIN_J1_STEP, HIGH);
+  delayMicroseconds(2);     // pulse width (TMC2209 only needs a few µs)
+  digitalWrite(PIN_J1_STEP, LOW);
+}
+
+void enableAllMotors() {
+  digitalWrite(PIN_J1_EN, LOW);   // LOW = enabled for TMC2209
+  digitalWrite(PIN_J2_EN, LOW);
+}
+
+void disableAllMotors() {
+  digitalWrite(PIN_J1_EN, HIGH);  // HIGH = disabled
+  digitalWrite(PIN_J2_EN, HIGH);
+  motion_active = false;          // stop any in-progress motion
 }
 
 void startHoming() {
@@ -145,25 +205,42 @@ bool commandIsMotion(const MotionCommand &cmd) {
 }
 
 void startMotion(const MotionCommand &cmd) {
-  // Setup motion planning, timers, step generation, etc.
-  // --------------------------------------------------
-  // TODO: implement motion start
-  // --------------------------------------------------
+  // For now: always move Joint 1 "forward" a fixed distance
+  motion_active      = true;
+  j1_steps_done      = 0;
+  last_step_time_us  = micros();
+
+  // Choose direction (flip LOW/HIGH if motor turns wrong way)
+  digitalWrite(PIN_J1_DIR, LOW);
 }
 
 void updateMotion() {
-  // Called repeatedly in EXECUTE to advance motion.
-  // Non-blocking: just do one step or small chunk of work.
-  // --------------------------------------------------
-  // TODO: step generation / trajectory update
-  // --------------------------------------------------
+  if (!motion_active) return;
+
+  unsigned long now = micros();
+  if (now - last_step_time_us >= STEP_INTERVAL_US) {
+    last_step_time_us = now;
+
+    // One step on J1
+    singleStepJ1();
+    j1_steps_done++;
+
+    // Optional debug every 100 steps
+    if (j1_steps_done % 100 == 0) {
+      Serial.print("J1 steps: ");
+      Serial.println(j1_steps_done);
+    }
+  }
 }
 
 bool motionComplete() {
-  // Return true when the current motion is finished.
-  // --------------------------------------------------
-  // TODO: implement real completion check
-  // --------------------------------------------------
+  if (!motion_active) return false;
+
+  if (j1_steps_done >= J1_STEPS_PER_MOVE) {
+    motion_active = false;
+    return true;
+  }
+
   return false;
 }
 
@@ -179,6 +256,36 @@ bool errorCleared() {
   // Return true when fault condition is cleared and safe to reset.
   // For now, tie it to reset button as well.
   return resetRequested();
+}
+
+// ---------------------- GUI G-code Line Handler ------------
+
+void gui_handle_line(const String &line) {
+  if (line.length() == 0) {
+    Serial.println("ERR:EMPTY");
+    return;
+  }
+
+  // Extract first token (command) before first space
+  int firstSpace = line.indexOf(' ');
+  String cmd = (firstSpace == -1) ? line : line.substring(0, firstSpace);
+  cmd.trim();  // remove \r or extra spaces
+
+  bool supported =
+      cmd == "G0"  || cmd == "G1"  ||
+      cmd == "G90" || cmd == "G91" ||
+      cmd == "G20" || cmd == "G21" ||
+      cmd == "M2"  || cmd == "M6";
+
+  if (supported) {
+    Serial.print("OK:");
+    Serial.print(cmd);
+    Serial.print(" ");
+    Serial.println(line);
+  } else {
+    Serial.print("ERR:UNKNOWN ");
+    Serial.println(line);
+  }
 }
 
 // ---------------------- State Entry Helpers ----------------
@@ -227,7 +334,10 @@ void enterState(FsmState newState) {
 // ---------------------- Arduino Setup / Loop ---------------
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(GUI_BAUD);
+  // Optional: wait a moment for Serial to be ready on some boards
+  delay(100);
+  Serial.println("MCU READY (gui_mcu_comm test)");
 
   pinMode(PIN_ESTOP,      INPUT_PULLUP);
   pinMode(PIN_BTN_START,  INPUT_PULLUP);
@@ -236,17 +346,46 @@ void setup() {
   pinMode(PIN_BTN_CANCEL, INPUT_PULLUP);
   pinMode(PIN_BTN_RESET,  INPUT_PULLUP);
 
-  // TODO: configure step/dir pins, limit switches, etc.
-
   enterState(STATE_INIT);
 }
 
 void loop() {
-  // 1) Global emergency-stop check (from ANY state)
+  // ---- GUI G-code listener (runs in all states) ----
+  while (Serial.available() > 0) {
+    char c = Serial.read();
+
+    if (c == '\r') {
+      continue;  // ignore CR
+    }
+
+    if (c == '\n') {
+      // End of line
+      if (gui_line.length() > 0) {
+        if (gui_line.length() <= GUI_MAX_LEN) {
+          gui_handle_line(gui_line);
+        } else {
+          Serial.print("ERR:TOO_LONG ");
+          Serial.println(gui_line);
+        }
+        gui_line = "";
+      }
+    } else {
+      // Add character to line buffer
+      gui_line += c;
+
+      // Hard cap to avoid growing without bound (not strictly needed)
+      if (gui_line.length() > GUI_MAX_LEN + 10) {
+        gui_line.remove(GUI_MAX_LEN + 10);
+      }
+    }
+  }
+
+  // ---- Global emergency-stop check (from ANY state) ----
   if (estopPressed() && currentState != STATE_EMERGENCY_STOP) {
     enterState(STATE_EMERGENCY_STOP);
   }
 
+  // ---- Main FSM ----
   switch (currentState) {
 
     // ------------------ S0: INIT ----------------------
@@ -284,30 +423,18 @@ void loop() {
 
     // ------------------ S2: IDLE ----------------------
     case STATE_IDLE: {
-      // Check for incoming command
-      MotionCommand cmd = readCommand();
-      if (cmd.valid) {
-        if (!commandIsValid(cmd)) {
-          enterState(STATE_ERROR);
-        } else if (commandIsMotion(cmd)) {
-          currentCommand = cmd;
-          enterState(STATE_EXECUTE);
-        } else {
-          // Non-motion commands can be handled here
-          // (e.g., status request) without leaving IDLE
-        }
-      }
+      // For now, do nothing here.
+      // Later you can check for new motion commands / buttons.
       break;
     }
 
     // ------------------ S3: EXECUTE -------------------
     case STATE_EXECUTE: {
+      // Update motion and look for completion / faults
       updateMotion();
 
       if (motionFault()) {
         enterState(STATE_ERROR);
-      } else if (pauseRequested()) {
-        enterState(STATE_PAUSE);
       } else if (motionComplete()) {
         enterState(STATE_IDLE);
       }
@@ -329,19 +456,20 @@ void loop() {
 
     // ------------------ S5: ERROR ---------------------
     case STATE_ERROR: {
-      // Stay here until user resets and error conditions are cleared
-      if (resetRequested() && errorCleared()) {
-        enterState(STATE_HOME);   // re-home after error
+      disableAllMotors(); // kill power to motors on error
+      // Stay here until user clears error
+      if (errorCleared()) {
+        enterState(STATE_INIT);
       }
       break;
     }
 
-    // ------------------ S6: EMERGENCY STOP -----------
+    // ------------- S6: EMERGENCY STOP ----------------
     case STATE_EMERGENCY_STOP: {
-      // Remain here while e-stop is pressed
-      if (!estopPressed() && resetRequested()) {
-        // After e-stop is cleared + reset is requested, go home
-        enterState(STATE_HOME);
+      disableAllMotors(); // immediate motor disable
+      // Require reset after E-stop
+      if (resetRequested()) {
+        enterState(STATE_INIT);
       }
       break;
     }
