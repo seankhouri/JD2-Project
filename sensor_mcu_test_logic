@@ -1,0 +1,11 @@
+#include <Arduino.h>
+
+const int PIN_LIMIT = 32;   // sensor input pin
+
+void setup() {
+  pinMode(PIN_LIMIT, INPUT_PULLUP);
+}
+
+void loop() {
+  // nothing needed; pin is just pulled up
+}

@@ -1,0 +1,12 @@
+#include <Arduino.h>
+
+const int PIN_J1_STEP = 26;   // use same pin as main firmware
+
+void setup() {
+  pinMode(PIN_J1_STEP, OUTPUT);
+}
+
+void loop() {
+  digitalWrite(PIN_J1_STEP, HIGH);
+  digitalWrite(PIN_J1_STEP, LOW);
+}

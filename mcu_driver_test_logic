@@ -1,0 +1,14 @@
+#include <Arduino.h>
+
+const int PIN_J1_STEP = 26;
+
+void setup() {
+  pinMode(PIN_J1_STEP, OUTPUT);
+}
+
+void loop() {
+  digitalWrite(PIN_J1_STEP, HIGH);
+  delay(1);   // 1 ms HIGH
+  digitalWrite(PIN_J1_STEP, LOW);
+  delay(1);   // 1 ms LOW
+}

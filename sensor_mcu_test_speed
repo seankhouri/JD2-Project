@@ -1,0 +1,20 @@
+#include <Arduino.h>
+
+const int PIN_LIMIT = 32;   // sensor input
+const int PIN_OUT   = 26;   // timing output
+
+void setup() {
+  pinMode(PIN_LIMIT, INPUT_PULLUP);
+  pinMode(PIN_OUT, OUTPUT);
+  digitalWrite(PIN_OUT, LOW);
+}
+
+void loop() {
+  int val = digitalRead(PIN_LIMIT);
+
+  if (val == LOW) {
+    digitalWrite(PIN_OUT, HIGH);   // sensor active
+  } else {
+    digitalWrite(PIN_OUT, LOW);    // sensor inactive
+  }
+}
